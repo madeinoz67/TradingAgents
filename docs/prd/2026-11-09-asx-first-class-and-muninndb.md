@@ -105,7 +105,8 @@ Verified 2026-11-09. This section decides Phase 2's shape.
 | **SEC EDGAR** | Structurally US-only. | Needs a replacement, not a patch |
 | **ASX filings** | The licensed route is **ASX Online Information Services** (MIA REST API, auth-token flow, subscription). Announcements including Appendix 3Y director-interest notices are served through it. Third-party scrapers (e.g. Apify ASX announcements) exist but carry licensing and reliability risk. | Dated AU fundamentals require a paid subscription. There is no free official API |
 | **EODHD (eodhd.com)** | **Strongest candidate.** Open-source MCP server with 72 tools, three transports (streamable-http, SSE, stdio), in free and paid plans. Covers EOD historical prices, fundamentals (incl. bulk), company news + sentiment, macro indicators by country, technical indicators, exchange/ticker resolution, and economic events. Documents ASX as a supported market and ships an ASX corporate-actions API (beta). **One unverified detail:** the exchange code for ASX (their convention is `<TICKER>.<EXCHANGECODE>`, e.g. `CDR.WAR`); their exchange-list endpoint refused an unauthenticated request. Confirm `AU` on a real ticker before committing | If ASX fundamentals and macro both serve, this removes the ASX Online subscription from Phase 2 entirely |
-| **FRED (AU series)** | OECD-sourced Australian interest-rate series do exist (e.g. `IRSTCI01AUM156N`), **but the OECD discontinued its MEI series in 2023**, so many of these stopped updating. The authoritative source is the RBA directly (table F1.1 cash rate target). | Do not wire AU macro to FRED. Either integrate RBA or declare macro unavailable for AU |
+| **FRED (AU series)** | OECD-sourced Australian interest-rate series do exist (e.g. `IRSTCI01AUM156N`), **but the OECD discontinued its MEI series in 2023**, so many of these stopped updating. Do not wire AU macro to FRED | Superseded for AU by a dedicated RBA source |
+| **RBA (Reserve Bank of Australia)** | **Decided: this is the AU macro source.** The RBA publishes statistical tables (F1.1 cash rate target and the F-series interest rates, plus A-series and G-series) as CSV/XLSX and maintains a public statistical tables page. Series are authoritative, current, and free. | New `rba` vendor module serving the `macro_data` category for AU. Rate series are straightforward; broader AU series are a table-by-table mapping exercise |
 
 **The blunt version:** AU prices are cheap; AU fundamentals are a licence purchase; AU macro is a scraper or a gap. That is a budget decision, not an engineering one.
 
@@ -122,7 +123,14 @@ Existing vendors are plain modules under `dataflows/vendors/`: `alpha_vantage/`,
 
 **So adding EODHD is: one module plus registry entries.** No architectural surgery.
 
-**But the registry has a real gap that R5 closes.** It maps method → vendor with no declared capability, so nothing stops the router from handing an ASX ticker to `sec_edgar`; the vendor accepts the call and fails late with `NoMarketDataError`. The missing piece is a per-vendor `supports(market) -> bool` (or a declared market set), consulted by `get_vendor` before dispatch. That single addition is what turns "adapter registry" into "market-aware adapter registry", and it is why EODHD slots in cleanly only after Phase 1.
+**But there is no standardized interface.** The vendors are plain Python modules and the dispatch is duck-typed: `route_to_vendor` does `impl_func(*args, **kwargs)`, so the only contract a vendor satisfies is "accepts the same positional arguments as the tool". There is no ABC, no `Protocol`, no base class, and no declared capability set. A vendor cannot say which markets or fields it covers, and nothing stops the router handing an ASX ticker to `sec_edgar`; that vendor accepts the call and fails late with `NoMarketDataError`.
+
+Two additions close this, and they are the same change:
+
+1. A `Vendor` protocol (or explicit `supports(market) -> bool` plus a declared field set) that `get_vendor` consults before dispatch
+2. Registry entries that carry the declared capability alongside the callable
+
+That single step turns "adapter registry" into "market-aware adapter registry", and it is why EODHD slots in cleanly only after Phase 1: without it, EODHD becomes a seventh vendor that answers some markets and fails late on others, exactly like the six already there.
 
 ---
 
@@ -235,6 +243,14 @@ Numbered as ideal-state criteria: each states what must be true and how it is fa
 | R21 | Every existing US test passes unchanged | any test modified to accommodate the abstraction |
 | R22 | A full US run produces the same decision path as before the change | a diff in node sequence or decision schema for the same inputs |
 
+### 5.7 AU macro source (decided 2026-11-09)
+
+| # | Requirement | Falsified by |
+|---|---|---|
+| R23 | AU `macro_data` is served by an `rba` vendor reading RBA statistical tables, registered in `VENDOR_METHODS` beside `fred` | an AU run calling FRED, or an AU macro answer with no RBA provenance |
+| R24 | The AU macro alias set covers at minimum cash rate, AU CPI, unemployment and the 10-year AGB yield, each mapping to a named RBA table series | an AU run where the news analyst cannot ask for the RBA cash rate by name |
+| R25 | Every AU macro value carries its table and publication date | an AU macro figure in a report with no source date |
+
 ---
 
 ## 6. MuninnDB integration design
@@ -319,7 +335,7 @@ Net effect: the markdown log stays the system of record for settlement state; Mu
 ## 8. Open questions for the principal
 
 1. **ASX filings source — now a trial, then a spend decision.** EODHD is the first thing to test: if `BHP.AU` (code to confirm) returns fundamentals, news and macro through their MCP server, the ASX Online subscription leaves the critical path entirely. If it does not, the only licensed route remains ASX Online Information Services (MIA REST, token auth, subscription), and the choice is fund it, accept a scraper's licensing exposure, or ship AU with prices and news only and say so plainly.
-2. **AU macro — integrate RBA, or declare a gap.** FRED's Australian series are OECD-sourced and largely stopped updating in 2023, so they are not usable as a regime signal. Either wire the RBA's F1.1 cash-rate table directly, or mark `macro_data` as unavailable for AU and let the prompt say so.
+2. **AU macro — decided, RBA rather than FRED.** FRED's Australian series are OECD-sourced and largely stopped updating in 2023, so they are not a usable regime signal. The `rba` vendor plugs into `macro_data` for AU (R23-R25). Open sub-question: which RBA tables beyond the rate series are worth wiring first, given each is a mapping exercise.
 3. **Structured-output token budget.** With `max_tokens=16384` the real PM prompt still fell back once. Do you want the budget raised (say 32,768) for structured agents, or a schema-conformance retry that raises the budget and retries once before falling back to free text?
 
 ---
@@ -329,8 +345,8 @@ Net effect: the markdown log stays the system of record for settlement state; Mu
 | Phase | Content | Exit condition |
 |---|---|---|
 | **0 — Truth** | Fix the `A$` parse bug; make venue-unavailable distinct from no-data; add `.AX` to examples; `AUS200` alias | R7, R10, R11, R15 green |
-| **1 — Abstraction** | `MarketProfile`, `resolve_market`, vendor support declarations, prompt regime substitution | R1-R6, R13, R14, R21, R22 green; US tests untouched |
-| **2 — ASX data** | AU vendor chain, insider handling, macro handling, calendar decision | R8, R9 green; a real ASX run produces a report |
+| **1 — Abstraction** | `MarketProfile`, `resolve_market`, the `Vendor` protocol with `supports(market)`, registry entries carrying capability, prompt regime substitution | R1-R6, R13, R14, R21, R22 green; US tests untouched |
+| **2 — ASX data** | Trial EODHD on a real ASX ticker; AU vendor chain; `rba` macro vendor (R23-R25); insider handling; calendar decision | R8, R9, R23-R25 green; a real ASX run produces a report |
 | **3 — MuninnDB** | Adapter, vault/tag scheme, decision + thesis + reflection writes | R16-R20 green |
 | **4 — Proof** | One full ASX run and one full US run, both with evidence | side-by-side report |
 
