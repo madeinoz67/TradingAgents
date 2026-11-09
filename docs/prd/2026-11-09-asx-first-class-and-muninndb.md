@@ -104,9 +104,25 @@ Verified 2026-11-09. This section decides Phase 2's shape.
 | **Alpha Vantage** | ASX support is a **grey area**. Not officially listed among supported exchanges; fundamentals coverage for Australian listings uncertain. | Do not depend on it for AU. Treat as unsupported until proven on a real ticker |
 | **SEC EDGAR** | Structurally US-only. | Needs a replacement, not a patch |
 | **ASX filings** | The licensed route is **ASX Online Information Services** (MIA REST API, auth-token flow, subscription). Announcements including Appendix 3Y director-interest notices are served through it. Third-party scrapers (e.g. Apify ASX announcements) exist but carry licensing and reliability risk. | Dated AU fundamentals require a paid subscription. There is no free official API |
+| **EODHD (eodhd.com)** | **Strongest candidate.** Open-source MCP server with 72 tools, three transports (streamable-http, SSE, stdio), in free and paid plans. Covers EOD historical prices, fundamentals (incl. bulk), company news + sentiment, macro indicators by country, technical indicators, exchange/ticker resolution, and economic events. Documents ASX as a supported market and ships an ASX corporate-actions API (beta). **One unverified detail:** the exchange code for ASX (their convention is `<TICKER>.<EXCHANGECODE>`, e.g. `CDR.WAR`); their exchange-list endpoint refused an unauthenticated request. Confirm `AU` on a real ticker before committing | If ASX fundamentals and macro both serve, this removes the ASX Online subscription from Phase 2 entirely |
 | **FRED (AU series)** | OECD-sourced Australian interest-rate series do exist (e.g. `IRSTCI01AUM156N`), **but the OECD discontinued its MEI series in 2023**, so many of these stopped updating. The authoritative source is the RBA directly (table F1.1 cash rate target). | Do not wire AU macro to FRED. Either integrate RBA or declare macro unavailable for AU |
 
 **The blunt version:** AU prices are cheap; AU fundamentals are a licence purchase; AU macro is a scraper or a gap. That is a budget decision, not an engineering one.
+
+### 2.4 The vendor layer is already an adapter registry
+
+Yes, and this is the good news for adding EODHD. `dataflows/router.py` already separates *what* from *who supplies it*:
+
+- `TOOLS_CATEGORIES` groups 11 tools into 6 categories (prices, technicals, fundamentals, news, macro, prediction markets)
+- `VENDOR_METHODS` maps each tool to a dict of `{vendor_name: implementation}`, so `get_balance_sheet` currently resolves to `alpha_vantage`, `sec_edgar`, or `yfinance`
+- `get_vendor(category, method)` reads the configured chain; `route_to_vendor` dispatches
+- `OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}` degrade to a sentinel on failure, while core categories raise so a broken primary is loud
+
+Existing vendors are plain modules under `dataflows/vendors/`: `alpha_vantage/`, `yahoo/`, `fred.py`, `polymarket.py`, `reddit.py`, `sec_edgar.py`, `stocktwits.py`.
+
+**So adding EODHD is: one module plus registry entries.** No architectural surgery.
+
+**But the registry has a real gap that R5 closes.** It maps method → vendor with no declared capability, so nothing stops the router from handing an ASX ticker to `sec_edgar`; the vendor accepts the call and fails late with `NoMarketDataError`. The missing piece is a per-vendor `supports(market) -> bool` (or a declared market set), consulted by `get_vendor` before dispatch. That single addition is what turns "adapter registry" into "market-aware adapter registry", and it is why EODHD slots in cleanly only after Phase 1.
 
 ---
 
@@ -302,7 +318,7 @@ Net effect: the markdown log stays the system of record for settlement state; Mu
 
 ## 8. Open questions for the principal
 
-1. **ASX filings source — a spend decision.** There is no free official API. The licensed route is ASX Online Information Services (MIA REST, token auth, subscription) and it is the only path that gives dated statements and Appendix 3Y notices. Choose: fund the subscription, accept a third-party scraper and its licensing exposure, or ship AU with prices and news only and state plainly that dated fundamentals are unavailable for this market.
+1. **ASX filings source — now a trial, then a spend decision.** EODHD is the first thing to test: if `BHP.AU` (code to confirm) returns fundamentals, news and macro through their MCP server, the ASX Online subscription leaves the critical path entirely. If it does not, the only licensed route remains ASX Online Information Services (MIA REST, token auth, subscription), and the choice is fund it, accept a scraper's licensing exposure, or ship AU with prices and news only and say so plainly.
 2. **AU macro — integrate RBA, or declare a gap.** FRED's Australian series are OECD-sourced and largely stopped updating in 2023, so they are not usable as a regime signal. Either wire the RBA's F1.1 cash-rate table directly, or mark `macro_data` as unavailable for AU and let the prompt say so.
 3. **Structured-output token budget.** With `max_tokens=16384` the real PM prompt still fell back once. Do you want the budget raised (say 32,768) for structured agents, or a schema-conformance retry that raises the budget and retries once before falling back to free text?
 
