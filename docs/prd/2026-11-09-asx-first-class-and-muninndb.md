@@ -94,7 +94,7 @@ Evidence below is from the live repository at `main`, gathered via Gortex graph 
 
 ---
 
-## 2.3 External data reality — what ASX can actually get
+### 2.3 External data reality — what ASX can actually get
 
 Verified 2026-11-09. This section decides Phase 2's shape.
 
