@@ -110,6 +110,7 @@ Verified 2026-11-09. This section decides Phase 2's shape.
 
 ---
 
+## 3. Goals and non-goals
 
 ### Goals
 
