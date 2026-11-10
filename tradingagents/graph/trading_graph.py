@@ -78,6 +78,11 @@ class TradingAgentsGraph:
         extra = {"callbacks": self.callbacks} if self.callbacks else {}
         self.deep_thinking_llm = create_tier_client(self.config, "deep", **extra).get_llm()
         self.quick_thinking_llm = create_tier_client(self.config, "quick", **extra).get_llm()
+        # Trader may run its own tier; falls back to the quick tier.
+        self.trader_llm = (
+            create_tier_client({**self.config, "quick_think_llm": self.config["trader_think_llm"]}, "quick", **extra).get_llm()
+            if self.config.get("trader_think_llm") else self.quick_thinking_llm
+        )
 
         self.memory_log = TradingMemoryLog(self.config)
 
@@ -98,6 +103,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.conditional_logic,
             max_tool_rounds,
+            trader_llm=self.trader_llm,
         )
 
         self.propagator = Propagator(
